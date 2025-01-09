@@ -160,6 +160,8 @@ class Qwen2Config(PretrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         attention_dropout=0.0,
+        number_of_experts=8,
+        expert_world_size=8,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -189,6 +191,9 @@ class Qwen2Config(PretrainedConfig):
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)
+
+        self.number_of_experts = number_of_experts
+        self.expert_world_size = expert_world_size
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,

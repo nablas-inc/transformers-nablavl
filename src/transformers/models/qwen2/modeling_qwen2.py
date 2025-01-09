@@ -20,6 +20,8 @@ from ...modeling_outputs import (
     QuestionAnsweringModelOutput,
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
+    MoeModelOutputWithPast,
+    MoeCausalLMOutputWithPast,
 )
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
@@ -33,6 +35,7 @@ from ...utils import (
     replace_return_docstrings,
 )
 from .configuration_qwen2 import Qwen2Config
+import deepspeed
 
 
 logger = logging.get_logger(__name__)
@@ -230,7 +233,8 @@ class Qwen2DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Qwen2Attention(config=config, layer_idx=layer_idx)
-        self.mlp = Qwen2MLP(config)
+        self.mlp_base = Qwen2MLP(config)
+        self.mlp = deepspeed.moe.layer.MoE(hidden_size=config.hidden_size, expert=self.mlp_base, num_experts=config.number_of_experts, ep_size=config.expert_world_size)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         if config.sliding_window and config._attn_implementation != "flash_attention_2":
@@ -272,12 +276,14 @@ class Qwen2DecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states, aux_loss, exp_counts = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
         if output_attentions:
             outputs += (self_attn_weights,)
+
+        outputs += ({"aux_loss": aux_loss, "exp_counts": exp_counts},)
 
         return outputs
 
@@ -515,7 +521,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+    ) -> Union[Tuple, MoeModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -559,6 +565,8 @@ class Qwen2Model(Qwen2PreTrainedModel):
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
+        all_aux_losses = ()
+        all_exp_counts = ()
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if output_hidden_states:
@@ -593,6 +601,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+                all_aux_losses += (layer_outputs[2]["aux_loss"],)
+                all_exp_counts += (layer_outputs[2]["exp_counts"],)
+            else:
+                all_aux_losses += (layer_outputs[1]["aux_loss"],)
+                all_exp_counts += (layer_outputs[1]["exp_counts"],)
 
         hidden_states = self.norm(hidden_states)
 
@@ -600,11 +613,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        output = BaseModelOutputWithPast(
+        output = MoeModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            router_logits=all_aux_losses, # We use the 'router_logits' key to transmit the aux losses. TODO(Maxime): fix.
         )
         return output if return_dict else output.to_tuple()
 
@@ -765,7 +779,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         return self.model
 
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    @replace_return_docstrings(output_type=MoECausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -781,7 +795,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
         **kwargs: Unpack[KwargsForCausalLM],
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Union[Tuple, MoECausalLMOutputWithPast]:
         r"""
         Args:
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -834,6 +848,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
+        aux_losses = 
+
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
 
@@ -845,12 +861,13 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return MoeCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            aux_loss=outputs.router_logits,
         )
 
 
