@@ -233,8 +233,7 @@ class Qwen2DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Qwen2Attention(config=config, layer_idx=layer_idx)
-        self.mlp_base = Qwen2MLP(config)
-        self.mlp = deepspeed.moe.layer.MoE(hidden_size=config.hidden_size, expert=self.mlp_base, num_experts=config.number_of_experts, ep_size=config.expert_world_size)
+        self.mlp = deepspeed.moe.layer.MoE(hidden_size=config.hidden_size, expert=Qwen2MLP(config), num_experts=config.number_of_experts, ep_size=config.expert_world_size)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         if config.sliding_window and config._attn_implementation != "flash_attention_2":
