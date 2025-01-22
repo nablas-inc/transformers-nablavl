@@ -162,6 +162,7 @@ class Qwen2Config(PretrainedConfig):
         attention_dropout=0.0,
         number_of_experts=8,
         expert_world_size=8,
+        enable_expert_tensor_parallelism=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -194,6 +195,7 @@ class Qwen2Config(PretrainedConfig):
 
         self.number_of_experts = number_of_experts
         self.expert_world_size = expert_world_size
+        self.enable_expert_tensor_parallelism = enable_expert_tensor_parallelism
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,

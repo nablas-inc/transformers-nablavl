@@ -239,7 +239,7 @@ class Qwen2DecoderLayer(nn.Module):
             num_experts=config.number_of_experts,
             ep_size=config.expert_world_size,
             k=2,
-            enable_expert_tensor_parallelism=True,
+            enable_expert_tensor_parallelism=config.enable_expert_tensor_parallelism,
         )
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
